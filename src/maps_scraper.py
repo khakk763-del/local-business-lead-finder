@@ -199,9 +199,35 @@ async def scrape_google_maps(
     """Full scrape flow on an already-created Playwright page."""
     url = build_search_url(query, location, language)
     log(f"Opening {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    try:
+        # 'commit' = wait only for navigation commit, not full DOM (bot pages hang on domcontentloaded)
+        await page.goto(url, wait_until="commit", timeout=90000)
+    except Exception as exc:
+        log(f"WARN: initial goto issue: {exc}")
+    # Give the JS app time to boot even if navigation was slow
+    await page.wait_for_timeout(8000)
     await dismiss_consent(page)
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(3000)
+
+    # Detect bot-block / CAPTCHA pages and report clearly
+    page_text = ""
+    try:
+        page_text = (await page.content())[:4000].lower()
+    except Exception:
+        pass
+    block_markers = ("unusual traffic", "recaptcha", "/sorry/index", "captcha-form")
+    if any(marker in page_text for marker in block_markers):
+        log("WARN: Google bot-check page detected")
+        try:
+            await page.screenshot(path="/tmp/block-page.png")
+            log("Saved block-page screenshot to /tmp/block-page.png")
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Google is showing a bot-check/CAPTCHA page. "
+            "This usually means the datacenter IP is flagged. "
+            "Retrying later or using residential proxies resolves it."
+        )
 
     # If Google shows a single place directly (no feed), handle it.
     feed_present = await page.locator('div[role="feed"]').count() > 0

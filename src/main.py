@@ -73,6 +73,8 @@ async def main() -> None:
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-features=IsolateOrigins,site-per-process",
                 ],
             }
             if proxy_config:

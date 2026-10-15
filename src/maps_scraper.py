@@ -84,22 +84,31 @@ async def dismiss_consent(page: Page) -> None:
             continue
 
 
-async def _scroll_feed(page: Page, target_count: int, max_scrolls: int = 40) -> None:
+async def _scroll_feed(page: Page, target_count: int, max_scrolls: int = 40, log=print) -> None:
     """Scroll the results feed until enough cards are loaded or it ends."""
-    feed = page.locator('div[role="feed"]')
-    try:
-        await feed.wait_for(timeout=15000)
-    except Exception:
+    # Try multiple feed selectors — Google changes markup frequently
+    feed = None
+    for selector in ('div[role="feed"]', 'div.m6QErb', '#pane div[role="feed"]'):
+        candidate = page.locator(selector).first
+        try:
+            await candidate.wait_for(timeout=8000)
+            feed = candidate
+            log(f"Feed found with selector: {selector}")
+            break
+        except Exception:
+            continue
+    if feed is None:
+        log("WARN: no results feed found with any known selector")
         return
     last_count = 0
     stable = 0
     for _ in range(max_scrolls):
-        cards = await page.locator('div[role="feed"] a[href*="/maps/place/"]').count()
+        cards = await page.locator('a[href*="/maps/place/"]').count()
         if cards >= target_count:
             break
         if cards == last_count:
             stable += 1
-            if stable >= 3:
+            if stable >= 4:
                 break
         else:
             stable = 0
@@ -108,7 +117,7 @@ async def _scroll_feed(page: Page, target_count: int, max_scrolls: int = 40) -> 
             await feed.evaluate("(el) => el.scrollBy(0, el.scrollHeight)")
         except Exception:
             break
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(1500)
 
 
 async def _get_text_safely(locator, timeout: int = 2500) -> str | None:
@@ -230,7 +239,15 @@ async def scrape_google_maps(
         )
 
     # If Google shows a single place directly (no feed), handle it.
-    feed_present = await page.locator('div[role="feed"]').count() > 0
+    feed_present = False
+    for selector in ('div[role="feed"]', 'div.m6QErb'):
+        try:
+            if await page.locator(selector).first.count() > 0:
+                feed_present = True
+                break
+        except Exception:
+            continue
+    log(f"Feed present: {feed_present}, page title: {(await page.title())[:80]}")
 
     leads: list[dict] = []
     seen_urls: set[str] = set()
@@ -253,11 +270,19 @@ async def scrape_google_maps(
         await capture_current_place()
         return leads
 
-    await _scroll_feed(page, max_results)
+    await _scroll_feed(page, max_results, log=log)
 
-    cards = page.locator('div[role="feed"] a[href*="/maps/place/"]')
+    cards = page.locator('a[href*="/maps/place/"]')
     total = await cards.count()
     log(f"Found {total} result cards, opening up to {max_results}")
+    if total == 0:
+        # Diagnostic screenshot for selector debugging
+        try:
+            await page.screenshot(path="/tmp/no-results.png")
+            html_len = len(await page.content())
+            log(f"DIAG: 0 cards. HTML length={html_len}, url={page.url[:120]}")
+        except Exception as exc:
+            log(f"DIAG screenshot failed: {exc}")
 
     for i in range(min(total, max_results)):
         try:

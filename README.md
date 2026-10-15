@@ -1,75 +1,86 @@
-# Local Business Lead Finder
+# Website Contact Extractor
 
-**Google Maps → enriched B2B lead lists.** Search any business category in any location and get outreach-ready leads: business name, address, phone, website, Google rating, review count, category, Maps URL — plus the **public contact email** found on each business's website.
+**Turn any list of business websites into an outreach-ready contact list.** Paste in up to 100 URLs and get back the public contact details each business publishes on its own site: **email addresses, phone numbers, and social media profiles** (Facebook, Instagram, LinkedIn, X, YouTube, TikTok).
 
-Built for agencies, founders, and sales teams doing outbound. Also works great as an **AI-agent tool** (one query in, structured JSON out).
+Built for agencies, founders, and sales teams doing outbound. Also works great as an **AI-agent tool** (one list in, structured JSON out).
 
 ## Input
 
 | Field | Required | Default | Description |
 |---|---|---|---|
-| `searchQuery` | ✅ | — | Business category, e.g. `dentists`, `plumbers`, `marketing agencies` |
-| `location` | ✅ | — | Where to search, e.g. `Riyadh, Saudi Arabia` |
-| `maxResults` | — | `20` | Max leads to return (1–200) |
-| `enrichWebsites` | — | `true` | Visit each website to find its public contact email |
-| `language` | — | `en` | Results language code (`en`, `ar`, `es`, …) |
+| `websites` | ✅ | — | Business website URLs (1–100 per run) |
+| `includePhones` | — | `true` | Also extract publicly listed phone numbers |
+| `includeSocial` | — | `true` | Also extract linked social media profiles |
 
 Example input:
 
 ```json
 {
-  "searchQuery": "dentists",
-  "location": "Riyadh, Saudi Arabia",
-  "maxResults": 20,
-  "enrichWebsites": true,
-  "language": "en"
+  "websites": [
+    "https://example-dental-clinic.com",
+    "https://example-plumbing.com",
+    "https://example-agency.com"
+  ],
+  "includePhones": true,
+  "includeSocial": true
 }
 ```
 
 ## Output
 
-Each lead is pushed to the default dataset:
+One dataset item per website:
 
 ```json
 {
-  "name": "Al Amal Dental Clinic",
-  "address": "King Fahd Rd, Al Olaya, Riyadh",
-  "phone": "+966112345678",
-  "website": "https://alamaldental.sa",
-  "email": "info@alamaldental.sa",
-  "rating": 4.6,
-  "reviewsCount": 231,
-  "category": "Dentist",
-  "googleMapsUrl": "https://www.google.com/maps/place/...",
-  "scrapedAt": "2026-10-15T17:00:00+00:00"
+  "website": "https://example-dental-clinic.com",
+  "emails": ["info@example-dental-clinic.com", "appointments@example-dental-clinic.com"],
+  "bestEmail": "info@example-dental-clinic.com",
+  "phones": ["+966 11 234 5678"],
+  "social": {
+    "facebook": "https://facebook.com/exampleclinic",
+    "instagram": "https://instagram.com/exampleclinic"
+  },
+  "contactPage": "https://example-dental-clinic.com/contact",
+  "status": "ok",
+  "contactsFound": 3
 }
 ```
 
-## Pricing (pay-per-event)
+| Status | Meaning |
+|---|---|
+| `ok` | Site processed (contacts may or may not be found) |
+| `no_contacts_found` | Site loaded but published no detectable contacts |
+| `invalid_url` | Input could not be parsed as a website URL |
+| `fetch_failed` | Site did not respond or blocked the request |
 
-| Event | Price | What it covers |
+## How it works
+
+1. Fetches each website's homepage (plus `/contact` as a fallback).
+2. Extracts `mailto:` / `tel:` links first (highest signal), then scans visible text.
+3. Picks the **best email** — preferring the business's own domain, then common roles (`info@`, `contact@`, `sales@`).
+4. Collects outbound social profile links, skipping share buttons.
+5. Runs up to 5 sites concurrently for speed; typical run of 20 sites finishes in under a minute.
+
+## Pricing
+
+Pay-per-event:
+
+| Event | Price | When it fires |
 |---|---|---|
-| `run-started` | **$0.50** flat | One charge per run — covers browser launch & fixed overhead |
-| `lead` | **$0.02** per lead | Charged once per lead pushed to the dataset |
+| `run-started` | **$0.50** | Once per run (covers fixed overhead) |
+| `contact` | **$0.05** | Per email or phone number extracted |
 
-Example: 20 leads = $0.50 + 20 × $0.02 = **$0.90**. You always see the max cost before running.
+You only pay for contacts actually found.
 
 ## Data & compliance
 
-- **Public business listings only.** The Actor reads what Google Maps publicly displays.
-- Emails come only from businesses' own public websites (contact pages).
-- No logins, no CAPTCHA bypassing, no personal-data harvesting.
-- Respects `robots.txt` on enriched websites.
+- **Public business data only.** The Actor reads contact details the business itself publishes on its public pages.
+- No login, no form submission, no CAPTCHA bypass, no personal-data harvesting.
+- If you use the output for outreach, comply with applicable anti-spam laws (e.g. CAN-SPAM, GDPR) and each recipient's opt-out requests.
 
-## Local development
+## Use cases
 
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m playwright install chromium
-APIFY_LOCAL_STORAGE_DIR=./storage .venv/bin/python -m src.main
-# put test input in storage/key_value_stores/default/INPUT.json
-```
-
-## Pricing setup (for the owner)
-
-Event prices are configured in **Apify Console → Actor → Monetization** (not in code). Steps in `MONETIZATION.md`.
+- Build cold-email lists from directories or Google results you already have.
+- Enrich a CRM with missing emails and phones.
+- Find social profiles for multi-channel outreach.
+- Feed structured contact JSON into AI sales agents.

@@ -1,14 +1,15 @@
-"""Local Business Lead Finder — Apify Actor entry point.
+"""Website Contact Extractor — Apify Actor entry point.
 
-Google Maps -> enriched B2B lead lists (public business data only).
+Give it a list of business websites; get back the public contact details
+each business publishes: email addresses, phone numbers, and social
+media profiles. Ideal for building outreach lists.
 
 Pricing (pay-per-event, configured in Apify Console > Monetization):
-    run-started : $0.50 flat per run  (covers fixed browser/proxy overhead —
-                                      mandatory margin protection on free plan)
-    lead        : $0.02 per lead pushed to the dataset
+    run-started : $0.50 flat per run  (covers fixed overhead —
+                                      mandatory margin protection)
+    contact     : $0.05 per contact extracted (each email or phone)
 
 Code fires the events; the USD amounts live in the Console config.
-See MONETIZATION.md for the exact setup steps.
 """
 
 from __future__ import annotations
@@ -16,14 +17,11 @@ from __future__ import annotations
 import asyncio
 
 from apify import Actor
-from playwright.async_api import async_playwright
 
-from .enrich import enrich_leads
-from .maps_http import fetch_places_http
-from .maps_scraper import scrape_google_maps
+from .extractor import extract_batch
 
-# Keep runs bounded: never burn more than this many leads per run.
-HARD_MAX_RESULTS = 200
+# Keep runs bounded: never process more than this many sites per run.
+HARD_MAX_SITES = 100
 
 
 async def charge_safely(event_name: str, count: int = 1) -> None:
@@ -39,109 +37,59 @@ async def main() -> None:
     async with Actor:
         inp = await Actor.get_input() or {}
 
-        query = (inp.get("searchQuery") or "").strip()
-        location = (inp.get("location") or "").strip()
-        max_results = int(inp.get("maxResults") or 20)
-        enrich_websites = bool(inp.get("enrichWebsites", True))
-        language = (inp.get("language") or "en").strip() or "en"
+        websites = inp.get("websites") or []
+        if isinstance(websites, str):
+            websites = [websites]
+        websites = [w for w in websites if isinstance(w, str) and w.strip()]
+        include_phones = bool(inp.get("includePhones", True))
+        include_social = bool(inp.get("includeSocial", True))
 
-        if not query or not location:
+        if not websites:
             raise ValueError(
-                "Both 'searchQuery' and 'location' are required "
-                "(e.g. searchQuery='dentists', location='Riyadh, Saudi Arabia')."
+                "'websites' is required: a list of 1-100 business website URLs."
             )
-        max_results = max(1, min(max_results, HARD_MAX_RESULTS))
+        websites = websites[:HARD_MAX_SITES]
 
         Actor.log.info(
-            f"Lead Finder started: query='{query}' location='{location}' "
-            f"max_results={max_results} enrich={enrich_websites}"
+            f"Contact Extractor started: {len(websites)} websites, "
+            f"phones={include_phones} social={include_social}"
         )
 
         # ---- Flat run-started charge (margin protection) -------------------
         await charge_safely("run-started")
 
-        # ---- Scrape: HTTP-first (no browser), Playwright fallback --------------
-        leads: list[dict] = []
-        http_ok = False
-        try:
-            leads = await fetch_places_http(
-                query=query,
-                location=location,
-                max_results=max_results,
-                language=language,
-                log=Actor.log.info,
-            )
-            http_ok = len(leads) > 0
-            Actor.log.info(f"HTTP scrape yielded {len(leads)} leads")
-        except Exception as exc:
-            Actor.log.warning(f"HTTP scrape failed, trying browser: {exc}")
+        # ---- Extract --------------------------------------------------------
+        results = await extract_batch(
+            websites, max_concurrency=5, log=Actor.log.info
+        )
 
-        if not http_ok:
-            Actor.log.info("Falling back to Playwright browser scrape")
-            proxy_config = None
-            try:
-                proxy_config = await Actor.create_proxy_configuration()
-            except Exception as exc:
-                Actor.log.warning(f"Proxy configuration unavailable: {exc}")
+        # Respect the include toggles in the output.
+        for r in results:
+            if not include_phones:
+                r["phones"] = []
+            if not include_social:
+                r["social"] = {}
+            r["contactsFound"] = len(r["emails"]) + len(r["phones"])
 
-            async with async_playwright() as pw:
-                launch_kwargs: dict = {
-                    "headless": True,
-                    "args": [
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-features=IsolateOrigins,site-per-process",
-                    ],
-                }
-                if proxy_config:
-                    proxy_url = await proxy_config.new_url()
-                    if proxy_url:
-                        launch_kwargs["proxy"] = {"server": proxy_url}
-                browser = await pw.chromium.launch(**launch_kwargs)
-                try:
-                    context = await browser.new_context(
-                        locale=f"{language}-US",
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/126.0.0.0 Safari/537.36"
-                        ),
-                    )
-                    page = await context.new_page()
-                    leads = await scrape_google_maps(
-                        page,
-                        query=query,
-                        location=location,
-                        max_results=max_results,
-                        language=language,
-                        log=Actor.log.info,
-                    )
-                    await context.close()
-                finally:
-                    await browser.close()
+        # ---- Output + per-contact charges ------------------------------------
+        total_contacts = 0
+        ok_count = 0
+        for r in results:
+            await Actor.push_data(r)
+            total_contacts += r["contactsFound"]
+            if r["status"] in ("ok", "no_contacts_found"):
+                ok_count += 1
 
-        Actor.log.info(f"Scraped {len(leads)} raw leads")
-
-        # ---- Enrich ----------------------------------------------------------
-        if enrich_websites and leads:
-            leads = await enrich_leads(leads)
-            Actor.log.info("Website email enrichment done")
-
-        # ---- Output + per-lead charges ---------------------------------------
-        charged = 0
-        for lead in leads:
-            await Actor.push_data(lead)
-        if leads:
-            await charge_safely("lead", count=len(leads))
-            charged = len(leads)
+        if total_contacts:
+            await charge_safely("contact", count=total_contacts)
 
         summary = {
-            "searchQuery": query,
-            "location": location,
-            "leadsFound": len(leads),
-            "leadsCharged": charged,
-            "eventsFired": ["run-started"] + (["lead x%d" % charged] if charged else []),
+            "websitesProcessed": len(results),
+            "websitesOk": ok_count,
+            "contactsFound": total_contacts,
+            "contactsCharged": total_contacts,
+            "eventsFired": ["run-started"]
+            + (["contact x%d" % total_contacts] if total_contacts else []),
         }
         await Actor.set_value("OUTPUT", summary)
         Actor.log.info(f"Done: {summary}")

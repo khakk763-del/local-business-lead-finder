@@ -126,3 +126,7 @@ async def main() -> None:
         }
         await Actor.set_value("OUTPUT", summary)
         Actor.log.info(f"Done: {summary}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

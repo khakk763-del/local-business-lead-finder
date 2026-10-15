@@ -19,6 +19,7 @@ from apify import Actor
 from playwright.async_api import async_playwright
 
 from .enrich import enrich_leads
+from .maps_http import fetch_places_http
 from .maps_scraper import scrape_google_maps
 
 # Keep runs bounded: never burn more than this many leads per run.
@@ -59,50 +60,66 @@ async def main() -> None:
         # ---- Flat run-started charge (margin protection) -------------------
         await charge_safely("run-started")
 
-        # ---- Scrape ---------------------------------------------------------
-        proxy_config = None
-        try:
-            proxy_config = await Actor.create_proxy_configuration()
-        except Exception as exc:
-            Actor.log.warning(f"Proxy configuration unavailable: {exc}")
-
+        # ---- Scrape: HTTP-first (no browser), Playwright fallback --------------
         leads: list[dict] = []
-        async with async_playwright() as pw:
-            launch_kwargs: dict = {
-                "headless": True,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                ],
-            }
-            if proxy_config:
-                proxy_url = await proxy_config.new_url()
-                if proxy_url:
-                    launch_kwargs["proxy"] = {"server": proxy_url}
-            browser = await pw.chromium.launch(**launch_kwargs)
+        http_ok = False
+        try:
+            leads = await fetch_places_http(
+                query=query,
+                location=location,
+                max_results=max_results,
+                language=language,
+                log=Actor.log.info,
+            )
+            http_ok = len(leads) > 0
+            Actor.log.info(f"HTTP scrape yielded {len(leads)} leads")
+        except Exception as exc:
+            Actor.log.warning(f"HTTP scrape failed, trying browser: {exc}")
+
+        if not http_ok:
+            Actor.log.info("Falling back to Playwright browser scrape")
+            proxy_config = None
             try:
-                context = await browser.new_context(
-                    locale=f"{language}-US",
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/126.0.0.0 Safari/537.36"
-                    ),
-                )
-                page = await context.new_page()
-                leads = await scrape_google_maps(
-                    page,
-                    query=query,
-                    location=location,
-                    max_results=max_results,
-                    language=language,
-                    log=Actor.log.info,
-                )
-                await context.close()
-            finally:
-                await browser.close()
+                proxy_config = await Actor.create_proxy_configuration()
+            except Exception as exc:
+                Actor.log.warning(f"Proxy configuration unavailable: {exc}")
+
+            async with async_playwright() as pw:
+                launch_kwargs: dict = {
+                    "headless": True,
+                    "args": [
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-features=IsolateOrigins,site-per-process",
+                    ],
+                }
+                if proxy_config:
+                    proxy_url = await proxy_config.new_url()
+                    if proxy_url:
+                        launch_kwargs["proxy"] = {"server": proxy_url}
+                browser = await pw.chromium.launch(**launch_kwargs)
+                try:
+                    context = await browser.new_context(
+                        locale=f"{language}-US",
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/126.0.0.0 Safari/537.36"
+                        ),
+                    )
+                    page = await context.new_page()
+                    leads = await scrape_google_maps(
+                        page,
+                        query=query,
+                        location=location,
+                        max_results=max_results,
+                        language=language,
+                        log=Actor.log.info,
+                    )
+                    await context.close()
+                finally:
+                    await browser.close()
 
         Actor.log.info(f"Scraped {len(leads)} raw leads")
 

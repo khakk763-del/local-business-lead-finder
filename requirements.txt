@@ -1,0 +1,9 @@
+# Core
+apify>=4.0
+playwright>=1.40
+crawlee[playwright]>=0.4
+
+# HTTP + HTML parsing for website email enrichment
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.0
